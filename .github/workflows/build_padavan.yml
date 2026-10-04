@@ -81,7 +81,7 @@ jobs:
           esac
           if ! wget -qL -O /tmp/toolchain.tar.xz "${{ env.PADAVAN_TOOLCHAIN_URL }}"; then
             echo "⚠️ Toolchain download failed, will build from source"
-          elif ! tar -C padavan-ng $ARCH -xf /tmp/toolchain.tar.xz; then
+          elif ! tar $ARCH -xf /tmp/toolchain.tar.xz; then
             echo "⚠️ Toolchain unpack failed, will build from source"
           fi
         fi
