@@ -146,7 +146,7 @@ jobs:
 
             cp -f "$cfg" padavan-ng/trunk/.config
             echo "::group::🔨 Building $CFG_NAME"
-            echo "⏳ Waiting for the last 100 lines of logs (~10-20 minutes per config)..."
+            echo "⏳ Waiting for the last 800 lines of logs (~10-20 minutes per config)..."
 
             pushd padavan-ng/trunk
 
@@ -161,14 +161,12 @@ jobs:
                 BUILD_OK=1
             else
                 echo "❌ Build failed for $CFG_NAME"
-                echo "Showing last 100 lines:"
-                tail -n 100 "$TEMP_LOG"
                 cp -f "$TEMP_LOG" "$GITHUB_WORKSPACE/release/${CFG_NAME}.build.log"
                 BUILD_OK=0
             fi
 
-            echo "Showing last 100 lines:"
-            tail -n 100 "$TEMP_LOG"
+            echo "Showing last 800 lines:"
+            tail -n 800 "$TEMP_LOG"
             rm -f "$TEMP_LOG"
 
             popd
@@ -244,7 +242,7 @@ jobs:
             fi
 
             FW_BASENAME="${FW_FILE_NAME%.*}"
-            FW_PATH="$GITHUB_WORKSPACE/release/${CONFIG_VENDOR}-${FW_BASENAME}"
+            FW_PATH="$GITHUB_WORKSPACE/release/${CONFIG_VENDOR}-${FW_BASENAME}_${CFG_NAME}"
 
             mkdir -p "$FW_PATH"
             cp -f "padavan-ng/trunk/images/$FW_FILE_NAME" "$FW_PATH/"
@@ -321,7 +319,7 @@ jobs:
         name: all_firmware_releases_${{ env.BUILD_TIMESTAMP }}
         retention-days: ${{ env.ARTIFACT_RETENTION }}
         path: |
-          release/*
+          release/*/
 
     - name: Upload build summary
       if: always()

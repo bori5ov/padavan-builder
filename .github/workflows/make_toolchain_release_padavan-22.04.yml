@@ -74,14 +74,14 @@ jobs:
         cd padavan-ng/toolchain
 
         echo "Building toolchain ${LIBC_DIR}"
-        echo "Waiting for the last 100 lines of logs (~25-40 minutes)..."
+        echo "Waiting for the last 800 lines of logs (~25-40 minutes)..."
 
         TEMP_LOG=$(mktemp)
         ./clean_sources.sh >/dev/null 2>&1
         ./build_toolchain.sh > "$TEMP_LOG" 2>&1
 
-        echo "Showing last 100 lines:"
-        tail -n 100 "$TEMP_LOG"
+        echo "Showing last 800 lines:"
+        tail -n 800 "$TEMP_LOG"
         rm -f "$TEMP_LOG"
 
         cd "$GITHUB_WORKSPACE"
