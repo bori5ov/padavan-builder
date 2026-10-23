@@ -1,5 +1,5 @@
-PADAVAN_REPO="https://github.com/bori5ov/padavan"
-PADAVAN_BRANCH="main"
+PADAVAN_REPO="https://gitlab.com/hadzhioglu/padavan-ng.git"
+PADAVAN_BRANCH="master"
 PADAVAN_COMMIT="HEAD"
 PADAVAN_TOOLCHAIN_URL="https://github.com/bori5ov/padavan-builder/releases/download/release-2026.10.04_10.40.44/toolchain_uClibc-ng-1.0.52.tar.xz"
 
