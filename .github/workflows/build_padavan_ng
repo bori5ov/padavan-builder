@@ -1,4 +1,4 @@
-name: Build firmware Padavan NG
+name: Build firmware Padavan_NG
 run-name: "Build firmware #${{ github.run_number }}"
 
 on:
