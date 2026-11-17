@@ -1,0 +1,392 @@
+name: Make firmware releases Padavan_NG
+run-name: "Make firmware releases #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    container:
+      image: ghcr.io/bori5ov/padavan_ng-builder:latest
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 20
+
+    - name: Install additional dependencies
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends bc jq zip
+
+    - name: Get variables
+      run: |
+        if [[ ! -f variables ]]; then
+          echo "❌ variables file not found"
+          exit 1
+        fi
+        sed -i 's|\r$||g' variables
+        grep -hE '^\s*PADAVAN_[A-Z0-9_]+=' variables >> "$GITHUB_ENV"
+        echo "BUILD_TIMESTAMP=$(date '+%Y.%m.%d_%H.%M.%S')" >> $GITHUB_ENV
+
+    - name: Download sources
+      run: |
+        git config --global --add safe.directory '*'
+        git clone -b "${{ env.PADAVAN_BRANCH }}" "${{ env.PADAVAN_REPO }}" padavan-ng --depth=1
+        git -C padavan-ng checkout "${{ env.PADAVAN_COMMIT }}"
+
+    - name: Install themes
+      run: |
+        if [[ -n "${PADAVAN_THEMES//[[:space:]]/}" ]] && [[ "$PADAVAN_THEMES" != "(" ]]; then
+          git clone --depth 1 -b "$PADAVAN_THEMES_BRANCH" "$PADAVAN_THEMES_REPO" themes
+          cp -r themes/common-theme themes/jquery.js padavan-ng/trunk/user/www/n56u_ribbon_fixed
+          for theme in $PADAVAN_THEMES; do
+            echo "Installing $theme theme"
+            cp -r "themes/$theme-theme" padavan-ng/trunk/user/www/n56u_ribbon_fixed
+          done
+        fi
+
+    - name: Setup toolchain
+      run: |
+        if [ -d "/opt/toolchain/out" ]; then
+          echo "📦 Copying toolchain from Docker image..."
+          cp -r /opt/toolchain/out padavan-ng/toolchain/
+        else
+          echo "📦 Downloading toolchain from repository..."
+          ARCH=""
+          case "${{ env.PADAVAN_TOOLCHAIN_URL }}" in
+              *.tzst|*.tar.zst) ARCH="--zstd" ;;
+              *.txz|*.tar.xz) ARCH="--xz" ;;
+          esac
+          if ! wget -qL -O /tmp/toolchain.tar.xz "${{ env.PADAVAN_TOOLCHAIN_URL }}"; then
+            echo "⚠️ Toolchain download failed, will build from source"
+          elif ! tar $ARCH -xf /tmp/toolchain.tar.xz; then
+            echo "⚠️ Toolchain unpack failed, will build from source"
+          fi
+        fi
+
+    - name: Get toolchain hash
+      id: toolchain-hash
+      run: |
+        TOOLCHAIN_HASH=$(find padavan-ng/toolchain -type f 2>/dev/null | sort | xargs md5sum 2>/dev/null | md5sum | cut -d ' ' -f 1)
+        echo "hash=$TOOLCHAIN_HASH" >> $GITHUB_OUTPUT
+
+    - name: Cache toolchain
+      uses: actions/cache@v6
+      with:
+        path: padavan-ng/toolchain/out
+        key: ${{ runner.os }}-toolchain-${{ steps.toolchain-hash.outputs.hash }}
+        restore-keys: |
+          ${{ runner.os }}-toolchain-
+
+    - name: Get padavan-ng variables
+      run: |
+        pushd padavan-ng/trunk
+        sed -i 's|\r$||g' versions.inc
+        grep -hE '^\s*FIRMWARE_[A-Z0-9_]+=' versions.inc >> "$GITHUB_ENV"
+        echo "FIRMWARE_BUILDS_REV=$(git rev-parse --short HEAD 2>/dev/null)" >> "$GITHUB_ENV"
+        popd
+
+    - name: Run custom pre-build script
+      run: '[[ -f pre-build.sh ]] && . pre-build.sh || :'
+
+    - name: Build toolchain
+      run: |
+        if compgen -G "padavan-ng/toolchain/out/mipsel-linux-uclibc/sysroot/lib/libuClibc-*.so" > /dev/null; then
+          echo "✅ Toolchain already present, skipping build"
+        else
+          cd padavan-ng/toolchain
+          ./clean_sources.sh
+          ./build_toolchain.sh
+        fi
+
+    - name: Build firmware
+      run: |
+        set +e
+        mkdir -p release
+        SUMMARY_ALL="$GITHUB_WORKSPACE/release/all-build-summary.txt"
+        BUILD_START_ALL=$(date '+%Y-%m-%d %H:%M:%S')
+        BUILD_START_ALL_EPOCH=$(date +%s)
+
+        echo "📊 Padavan Build Summary" > "$SUMMARY_ALL"
+        echo "Started:   $BUILD_START_ALL" >> "$SUMMARY_ALL"
+        echo "======================================" >> "$SUMMARY_ALL"
+        echo "" >> "$SUMMARY_ALL"
+
+        TOTAL=0
+        SUCCESSFUL=0
+        FAILED=0
+        WARNINGS=0
+        BUILD_FAILED=0
+
+        for cfg in configs.release/*.config; do
+            CFG_NAME=$(basename "$cfg" .config)
+            TOTAL=$((TOTAL + 1))
+
+            cp -f "$cfg" padavan-ng/trunk/.config
+            echo "::group::🔨 Building $CFG_NAME"
+            echo "⏳ Waiting for the last 800 lines of logs (~10-20 minutes per config)..."
+
+            pushd padavan-ng/trunk
+
+            sed -i 's|\r$||g' .config
+            . <(grep -hE '^\s*CONFIG_(VENDOR|FIRMWARE_PRODUCT_ID)=' .config)
+
+            TEMP_LOG=$(mktemp)
+            ./clear_tree.sh >/dev/null 2>&1
+
+            if ./build_firmware.sh > "$TEMP_LOG" 2>&1; then
+                echo "✅ Build successful"
+                BUILD_OK=1
+            else
+                echo "❌ Build failed for $CFG_NAME"
+                cp -f "$TEMP_LOG" "$GITHUB_WORKSPACE/release/${CFG_NAME}.build.log"
+                BUILD_OK=0
+            fi
+
+            echo "Showing last 800 lines:"
+            tail -n 800 "$TEMP_LOG"
+            rm -f "$TEMP_LOG"
+
+            popd
+
+            if [[ $BUILD_OK -eq 0 ]]; then
+                FAILED=$((FAILED + 1))
+                BUILD_FAILED=1
+                echo "❌ $CFG_NAME - FAILED: Build failed" >> "$SUMMARY_ALL"
+                echo "::endgroup::"
+                continue
+            fi
+
+            FW_FILE_NAME="$(find padavan-ng/trunk/images -type f -regextype posix-extended -iregex ".*\.(trx|bin)$" \
+                            -printf "%T@\t%f\n" | sort -V | tail -1 | cut -f2)"
+
+            if [[ -z "$FW_FILE_NAME" ]]; then
+                echo "❌ Firmware file not found"
+                FAILED=$((FAILED + 1))
+                BUILD_FAILED=1
+                echo "❌ $CFG_NAME - FAILED: Firmware file not found" >> "$SUMMARY_ALL"
+                echo "::endgroup::"
+                continue
+            fi
+
+            echo "✅ Firmware file: $FW_FILE_NAME"
+
+            echo "🔍 Validating firmware size..."
+            partitions="padavan-ng/trunk/configs/boards/${CONFIG_VENDOR}/${CONFIG_FIRMWARE_PRODUCT_ID}/partitions.config"
+            UTILIZATION="N/A"
+            FW_SIZE=0
+            MAX_FW_SIZE=0
+            FREE_MB=0
+
+            if [ -f "$partitions" ]; then
+                max_fw_size="$(awk '/Firmware/ { getline; getline; sub(",", ""); print strtonum($2); }' "$partitions")"
+                if [ -z "$max_fw_size" ] || [ "$max_fw_size" -eq 0 ]; then
+                    echo "⚠️ Could not determine max firmware size, skipping validation"
+                else
+                    fw_size="$(stat -c %s "padavan-ng/trunk/images/$FW_FILE_NAME")"
+                    FW_SIZE=$fw_size
+                    MAX_FW_SIZE=$max_fw_size
+
+                    if ((fw_size > max_fw_size)); then
+                        echo "❌ Firmware size exceeds maximum allowed size!"
+                        echo "   Size: $(numfmt --grouping "$fw_size") bytes"
+                        echo "   Limit: $(numfmt --grouping "$max_fw_size") bytes"
+                        FAILED=$((FAILED + 1))
+                        BUILD_FAILED=1
+                        echo "❌ $CFG_NAME - FAILED: Size exceeds limit" >> "$SUMMARY_ALL"
+                        echo "::endgroup::"
+                        continue
+                    fi
+
+                    UTILIZATION=$(awk "BEGIN {printf \"%.1f\", ($fw_size / $max_fw_size) * 100}")
+                    FREE_SPACE=$((max_fw_size - fw_size))
+                    FREE_MB=$(awk "BEGIN {printf \"%.1f\", $FREE_SPACE / 1048576}")
+
+                    if (( $(echo "$UTILIZATION > 99" | bc -l) )); then
+                        echo "⚠️ WARNING: Flash usage ${UTILIZATION}% (>99%)!"
+                        echo "▶️ Free space left: ${FREE_MB} MB"
+                        WARNINGS=$((WARNINGS + 1))
+                        echo "⚠️ $CFG_NAME - WARNING: Flash usage ${UTILIZATION}% (>99%)" >> "$SUMMARY_ALL"
+                    else
+                        echo "✅ Size validation passed (${UTILIZATION}% utilized, ${FREE_MB} MB free)"
+                        SUCCESSFUL=$((SUCCESSFUL + 1))
+                        echo "✅ $CFG_NAME - OK (${UTILIZATION}% utilized)" >> "$SUMMARY_ALL"
+                    fi
+                fi
+            else
+                echo "⚠️ partitions.config not found"
+                SUCCESSFUL=$((SUCCESSFUL + 1))
+                echo "✅ $CFG_NAME - OK" >> "$SUMMARY_ALL"
+            fi
+
+            FW_BASENAME="${FW_FILE_NAME%.*}"
+            FW_PATH="$GITHUB_WORKSPACE/release/${CONFIG_VENDOR}-${FW_BASENAME}_${CFG_NAME}"
+
+            mkdir -p "${FW_PATH}_tmp"
+            cp -f "padavan-ng/trunk/images/$FW_FILE_NAME" "${FW_PATH}_tmp/"
+            cp -f "$cfg" "${FW_PATH}_tmp/$(basename "$cfg")"
+
+            pushd "${FW_PATH}_tmp"
+            sha256sum "$FW_FILE_NAME" > "$FW_FILE_NAME.sha256"
+            md5sum "$FW_FILE_NAME" > "$FW_FILE_NAME.md5"
+            zip -j "${FW_PATH}.zip" *
+            popd
+
+            rm -rf "${FW_PATH}_tmp"
+
+            echo "::endgroup::"
+        done
+
+        BUILD_FINISH_ALL=$(date '+%Y-%m-%d %H:%M:%S')
+        BUILD_FINISH_ALL_EPOCH=$(date +%s)
+        BUILD_DURATION_ALL=$((BUILD_FINISH_ALL_EPOCH - BUILD_START_ALL_EPOCH))
+        BUILD_DURATION_MIN=$((BUILD_DURATION_ALL / 60))
+        BUILD_DURATION_SEC=$((BUILD_DURATION_ALL % 60))
+
+        {
+          echo "📊 Padavan Build Summary"
+          echo "Started:   $BUILD_START_ALL"
+          echo "Finished:  $BUILD_FINISH_ALL"
+          echo "Duration:  ${BUILD_DURATION_MIN} minutes ${BUILD_DURATION_SEC} seconds"
+          echo "======================================"
+          echo ""
+          tail -n +4 "$SUMMARY_ALL"
+          echo ""
+          echo "======================================"
+          echo "Total:      $TOTAL configs"
+          echo "Successful: $SUCCESSFUL"
+          echo "Failed:     $FAILED"
+          echo "Warnings:   $WARNINGS"
+          echo "======================================"
+        } > "${SUMMARY_ALL}.tmp" && mv "${SUMMARY_ALL}.tmp" "$SUMMARY_ALL"
+
+        echo "::group::📊 BUILD SUMMARY"
+        echo ""
+        cat "$SUMMARY_ALL"
+        echo ""
+        echo "::endgroup::"
+
+        if [ $BUILD_FAILED -eq 1 ]; then
+            echo "::error::❌ Some builds failed!"
+            echo "BUILD_FAILED=1" >> $GITHUB_ENV
+        else
+            echo "✅ All builds completed successfully!"
+            echo "BUILD_FAILED=0" >> $GITHUB_ENV
+        fi
+
+    - name: Build all_firmware_releases archive
+      if: always()
+      run: |
+        set +e
+        mkdir -p "$GITHUB_WORKSPACE/all_firmware_releases"
+        cd "$GITHUB_WORKSPACE/release"
+        for zip_file in *.zip; do
+          [[ -f "$zip_file" ]] || continue
+          base=$(basename "$zip_file" .zip)
+          [[ "$base" == all_firmware_releases_* ]] && continue
+          mkdir -p "$GITHUB_WORKSPACE/all_firmware_releases/$base"
+          unzip -q -o "$zip_file" -d "$GITHUB_WORKSPACE/all_firmware_releases/$base"
+        done
+        if [[ -d "$GITHUB_WORKSPACE/all_firmware_releases" ]] && [[ -n "$(ls -A "$GITHUB_WORKSPACE/all_firmware_releases" 2>/dev/null)" ]]; then
+          pushd "$GITHUB_WORKSPACE/all_firmware_releases"
+          zip -r "$GITHUB_WORKSPACE/release/all_firmware_releases_${{ env.BUILD_TIMESTAMP }}.zip" */
+          popd
+        fi
+        rm -rf "$GITHUB_WORKSPACE/all_firmware_releases"
+
+    - name: Pack summary into archive
+      if: always()
+      run: |
+        set +e
+        cd "$GITHUB_WORKSPACE/release"
+        if [ -f "all-build-summary.txt" ]; then
+          zip -j "all-build-summary_${{ env.BUILD_TIMESTAMP }}.zip" "all-build-summary.txt"
+        fi
+
+    - name: Run custom post-build script
+      run: '[[ -f post-build.sh ]] && . post-build.sh || :'
+
+    - name: Check if release files exist
+      run: |
+        if ! ls "$GITHUB_WORKSPACE/release/"*.zip >/dev/null 2>&1; then
+          echo "❌ No files found in release directory"
+          exit 1
+        fi
+
+    - name: Create GitHub Release
+      if: ${{ env.BUILD_FAILED == '0' }}
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: release-${{ env.BUILD_TIMESTAMP }}
+        name: Firmware 3.4.${{ env.FIRMWARE_ROOTFS_VER }}-${{ env.FIRMWARE_BUILDS_VER }}-${{ env.FIRMWARE_BUILDS_REV }}
+        files: |
+          release/*.zip
+        draft: false
+        prerelease: false
+        body: |
+          Padavan firmware version 3.4.${{ env.FIRMWARE_ROOTFS_VER }}-${{ env.FIRMWARE_BUILDS_VER }}-${{ env.FIRMWARE_BUILDS_REV }}
+          Repository used: ${{ env.PADAVAN_REPO }}
+
+  prepare-matrix:
+    runs-on: ubuntu-24.04
+    needs: build
+    if: always()
+    outputs:
+      files: ${{ steps.collect.outputs.files }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: all_firmware_releases_*
+          path: release
+          merge-multiple: true
+
+      - id: collect
+        run: |
+          FILES=$(for d in release/*/; do basename "$d"; done | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}')
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+
+  upload-artifacts:
+    runs-on: ubuntu-24.04
+    needs: prepare-matrix
+    if: needs.prepare-matrix.outputs.files != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJson(needs.prepare-matrix.outputs.files) }}
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: all_firmware_releases_*
+          path: release
+          merge-multiple: true
+
+      - name: Upload artifact ${{ matrix.file }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.file }}
+          path: release/${{ matrix.file }}
+          retention-days: ${{ env.ARTIFACT_RETENTION }}
