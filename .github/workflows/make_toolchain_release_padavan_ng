@@ -1,5 +1,5 @@
-name: Make toolchain release Padavan_NG ubuntu-22.04
-run-name: "Make toolchain release Padavan_NG ubuntu-22.04 #${{ github.run_number }}"
+name: Make toolchain release Padavan_NG
+run-name: "Make toolchain release Padavan_NG #${{ github.run_number }}"
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     defaults:
