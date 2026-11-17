@@ -1,0 +1,113 @@
+name: Make toolchain release Padavan_NG ubuntu-22.04
+run-name: "Make toolchain release Padavan ubuntu-22.04 #${{ github.run_number }}"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: bash
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 20
+
+    - name: Set up build tools
+      run: |
+        sudo apt update
+        sudo apt install --no-install-recommends -y \
+            autoconf automake autopoint cmake \
+            bison build-essential flex gawk \
+            gettext git gperf libtool libtool-bin \
+            pkg-config fakeroot kmod cpio doxygen \
+            texinfo help2man libncurses5-dev \
+            zlib1g-dev libsqlite3-dev gcc-multilib \
+            curl dos2unix unzip wget locales xxd libltdl-dev \
+            libgmp3-dev libmpfr-dev libarchive-tools libblkid-dev
+
+    - name: Get variables
+      run: |
+        if [[ ! -f variables ]]; then
+          echo "❌ variables file not found"
+          exit 1
+        fi
+        sed -i 's|\r$||g' variables
+        grep -hE '^\s*PADAVAN_[A-Z0-9_]+=' variables >> "$GITHUB_ENV"
+        echo "BUILD_TIMESTAMP=$(date '+%Y.%m.%d_%H.%M.%S')" >> $GITHUB_ENV
+
+    - name: Download sources
+      run: |
+        git config --global --add safe.directory '*'
+        git clone -b "${{ env.PADAVAN_BRANCH }}" "${{ env.PADAVAN_REPO }}" padavan-ng --depth=1
+        git -C padavan-ng checkout "${{ env.PADAVAN_COMMIT }}"
+
+    - name: Get Padavan variables
+      run: |
+        pushd padavan-ng/trunk
+        LIBC_DIR=$(grep -oP 'LIBC_DIR\s*=\s*\K.*' libc/Makefile | head -1 | tr -d '[:space:]')
+        echo "LIBC_DIR=$LIBC_DIR" >> $GITHUB_ENV
+        sed -i 's|\r$||g' versions.inc
+        grep -hE '^\s*FIRMWARE_[A-Z0-9_]+=' versions.inc >> "$GITHUB_ENV"
+        echo "FIRMWARE_BUILDS_REV=$(git rev-parse --short HEAD 2>/dev/null)" >> "$GITHUB_ENV"
+        popd
+
+    - name: Build toolchain
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/release"
+        cd padavan-ng/toolchain
+
+        echo "Building toolchain ${LIBC_DIR}"
+        echo "Waiting for the last 800 lines of logs (~25-40 minutes)..."
+
+        TEMP_LOG=$(mktemp)
+        ./clean_sources.sh >/dev/null 2>&1
+        ./build_toolchain.sh > "$TEMP_LOG" 2>&1
+
+        echo "Showing last 800 lines:"
+        tail -n 800 "$TEMP_LOG"
+        rm -f "$TEMP_LOG"
+
+        cd "$GITHUB_WORKSPACE"
+        tar cf - padavan-ng/toolchain/out | xz -9 > "$GITHUB_WORKSPACE/release/toolchain_${LIBC_DIR}.tar.xz"
+
+        cd "$GITHUB_WORKSPACE/release"
+        sha256sum "toolchain_${LIBC_DIR}.tar.xz" > "toolchain_${LIBC_DIR}.tar.xz.sha256"
+        md5sum "toolchain_${LIBC_DIR}.tar.xz" > "toolchain_${LIBC_DIR}.tar.xz.md5"
+
+    - name: Check if release files exist
+      run: |
+        if ! ls "$GITHUB_WORKSPACE/release/"*.tar.xz >/dev/null 2>&1; then
+          echo "❌ No files found in release directory"
+          exit 1
+        fi
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: release-${{ env.BUILD_TIMESTAMP }}
+        name: Toolchain ${{ env.LIBC_DIR }}
+        files: |
+          release/*.tar.xz
+          release/*.sha256
+          release/*.md5
+        draft: false
+        prerelease: false
+        body: |
+          Repository used: ${{ env.PADAVAN_REPO }}
