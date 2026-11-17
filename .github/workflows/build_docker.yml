@@ -13,7 +13,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/padavan-builder
+  IMAGE_NAME: ${{ github.repository_owner }}/padavan_ng-builder
 
 jobs:
   build:
