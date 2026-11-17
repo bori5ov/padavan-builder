@@ -1,4 +1,4 @@
-name: Make firmware releases Padavan
+name: Make firmware releases Padavan_NG
 run-name: "Make firmware releases #${{ github.run_number }}"
 
 on:
@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     container:
-      image: ghcr.io/bori5ov/padavan-builder:latest
+      image: ghcr.io/bori5ov/padavan_ng-builder:latest
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
